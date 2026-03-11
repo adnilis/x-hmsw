@@ -122,6 +122,23 @@ func BenchmarkBM25F_Transform(b *testing.B) {
 	}
 }
 
+// BenchmarkBM25F_BatchTransform BM25F 批量向量化基准测试
+func BenchmarkBM25F_BatchTransform(b *testing.B) {
+	config := BM25FConfig{
+		BM25Config:   BM25Config{MaxVocabSize: 5000},
+		FieldWeights: map[string]float64{"title": 2.0, "content": 1.0},
+	}
+
+	docs := generateRandomMultiFieldDocs(500)
+	v := NewBM25FVectorizer(config)
+	v.Fit(docs)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = v.BatchTransform(docs)
+	}
+}
+
 // BenchmarkIncrementalAdd 增量添加文档基准测试
 func BenchmarkIncrementalAdd(b *testing.B) {
 	config := BM25Config{MaxVocabSize: 10000}
@@ -167,6 +184,9 @@ func BenchmarkQueryOptimizerTopK(b *testing.B) {
 	optimizer := NewQueryOptimizer(v)
 	optimizer.SetMaxResults(100)
 
+	// 核心优化：预计算所有文档向量
+	optimizer.PrecomputeDocVectors(docs)
+
 	query := "编程 语言 开发"
 
 	b.ResetTimer()
@@ -184,6 +204,9 @@ func BenchmarkQueryOptimizerPruned(b *testing.B) {
 	v.Fit(docs)
 
 	optimizer := NewQueryOptimizer(v)
+
+	// 核心优化：预计算所有文档向量
+	optimizer.PrecomputeDocVectors(docs)
 
 	query := "编程"
 
@@ -341,4 +364,92 @@ func PrintPerformanceReport() {
 	sparseTime := time.Since(start)
 	fmt.Printf("1000 次稀疏向量化：%v (平均 %.2f μs/次)\n",
 		sparseTime, float64(sparseTime.Microseconds())/1000)
+}
+
+// BenchmarkBM25L_Fit BM25L 训练基准测试
+func BenchmarkBM25L_Fit(b *testing.B) {
+	config := DefaultBM25Config()
+	config.MaxVocabSize = 5000
+
+	docs := generateRandomDocs(1000, 50, 200)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		v := NewBM25LVectorizer(config)
+		v.Fit(docs)
+	}
+}
+
+// BenchmarkBM25L_Transform BM25L 向量化基准测试
+func BenchmarkBM25L_Transform(b *testing.B) {
+	config := DefaultBM25Config()
+	v := NewBM25LVectorizer(config)
+
+	docs := generateRandomDocs(500, 50, 200)
+	v.Fit(docs)
+
+	query := "编程 语言 开发"
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = v.Transform(query)
+	}
+}
+
+// BenchmarkBM25L_BatchTransform BM25L 批量向量化基准测试
+func BenchmarkBM25L_BatchTransform(b *testing.B) {
+	config := DefaultBM25Config()
+	v := NewBM25LVectorizer(config)
+
+	docs := generateRandomDocs(500, 50, 200)
+	v.Fit(docs)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = v.BatchTransform(docs)
+	}
+}
+
+// BenchmarkBM25P_Fit BM25+ 训练基准测试
+func BenchmarkBM25P_Fit(b *testing.B) {
+	config := DefaultBM25Config()
+	config.MaxVocabSize = 5000
+
+	docs := generateRandomDocs(1000, 50, 200)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		v := NewBM25PlusVectorizer(config)
+		v.Fit(docs)
+	}
+}
+
+// BenchmarkBM25P_Transform BM25+ 向量化基准测试
+func BenchmarkBM25P_Transform(b *testing.B) {
+	config := DefaultBM25Config()
+	v := NewBM25PlusVectorizer(config)
+
+	docs := generateRandomDocs(500, 50, 200)
+	v.Fit(docs)
+
+	query := "编程 语言 开发"
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = v.Transform(query)
+	}
+}
+
+// BenchmarkBM25P_BatchTransform BM25+ 批量向量化基准测试
+func BenchmarkBM25P_BatchTransform(b *testing.B) {
+	config := DefaultBM25Config()
+	v := NewBM25PlusVectorizer(config)
+
+	docs := generateRandomDocs(500, 50, 200)
+	v.Fit(docs)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = v.BatchTransform(docs)
+	}
 }

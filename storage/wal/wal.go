@@ -172,10 +172,6 @@ func (w *WAL) writeRecord(record *WALRecord) error {
 		return fmt.Errorf("failed to sync wal file: %w", err)
 	}
 
-	w.logger.Debug("wal record written",
-		"type", uint8(record.Type),
-		"size", len(recordData))
-
 	return nil
 }
 

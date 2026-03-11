@@ -2,6 +2,7 @@ package embedding
 
 import (
 	"math"
+	"runtime"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -67,7 +68,7 @@ func NewBM25LVectorizer(config BM25Config) *BM25LVectorizer {
 	}
 }
 
-// Fit 训练
+// Fit 训练（并行优化版）
 func (v *BM25LVectorizer) Fit(documents []string) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -77,23 +78,89 @@ func (v *BM25LVectorizer) Fit(documents []string) {
 		return
 	}
 
-	wordFreq := make(map[string]int64)
-	docFreq := make(map[string]int64)
-	totalLength := int64(0)
+	// 并行化词频统计
+	numWorkers := runtime.NumCPU()
+	if docCount < 100 {
+		numWorkers = 1
+	} else if docCount < 1000 {
+		numWorkers = 4
+	}
+
+	type localResult struct {
+		wordFreq    map[string]int64
+		docFreq     map[string]int64
+		docLengths  []int
+		totalLength int64
+	}
+
+	locals := make([]localResult, numWorkers)
+	for i := 0; i < numWorkers; i++ {
+		locals[i] = localResult{
+			wordFreq:   make(map[string]int64),
+			docFreq:    make(map[string]int64),
+			docLengths: make([]int, 0),
+		}
+	}
+
+	chunkSize := (docCount + numWorkers - 1) / numWorkers
+	var wg sync.WaitGroup
+
+	for w := 0; w < numWorkers; w++ {
+		start := w * chunkSize
+		end := start + chunkSize
+		if end > docCount {
+			end = docCount
+		}
+		if start >= docCount {
+			break
+		}
+
+		localIdx := w
+		wg.Add(1)
+		go func(s, e int) {
+			local := &locals[localIdx]
+			// 复用 seen map 减少分配
+			seen := make(map[string]bool, 64)
+			for i := s; i < e; i++ {
+				for k := range seen {
+					delete(seen, k)
+				}
+				tokens := v.tokenizer(documents[i])
+				local.docLengths = append(local.docLengths, len(tokens))
+				local.totalLength += int64(len(tokens))
+
+				for _, token := range tokens {
+					local.wordFreq[token]++
+					if !seen[token] {
+						seen[token] = true
+						local.docFreq[token]++
+					}
+				}
+			}
+			wg.Done()
+		}(start, end)
+	}
+
+	wg.Wait()
+
+	// 合并结果
+	wordFreq := make(map[string]int64, docCount*10)
+	docFreq := make(map[string]int64, docCount*5)
+	var totalLength int64
 	v.docLengths = make([]int, docCount)
 
-	for i, doc := range documents {
-		tokens := v.tokenizer(doc)
-		v.docLengths[i] = len(tokens)
-		totalLength += int64(len(tokens))
-
-		seen := make(map[string]bool)
-		for _, token := range tokens {
-			wordFreq[token]++
-			if !seen[token] {
-				seen[token] = true
-				docFreq[token]++
-			}
+	offset := 0
+	for _, local := range locals {
+		for word, freq := range local.wordFreq {
+			wordFreq[word] += freq
+		}
+		for word, freq := range local.docFreq {
+			docFreq[word] += freq
+		}
+		totalLength += local.totalLength
+		for _, length := range local.docLengths {
+			v.docLengths[offset] = length
+			offset++
 		}
 	}
 
@@ -199,15 +266,39 @@ func (v *BM25LVectorizer) Transform(document string) []float32 {
 	return vector
 }
 
-// BatchTransform 批量处理
+// BatchTransform 批量处理（动态worker优化版）
 func (v *BM25LVectorizer) BatchTransform(documents []string) [][]float32 {
-	vectors := make([][]float32, len(documents))
-
 	n := len(documents)
-	chunkSize := (n + 3) / 4
+	if n == 0 {
+		return nil
+	}
+
+	// 小批量使用串行
+	if n < 100 {
+		vectors := make([][]float32, n)
+		for i := 0; i < n; i++ {
+			vectors[i] = v.Transform(documents[i])
+		}
+		return vectors
+	}
+
+	vectors := make([][]float32, n)
+
+	// 动态计算worker数量
+	numWorkers := runtime.NumCPU()
+	if n < 1000 {
+		numWorkers = runtime.NumCPU()
+	} else {
+		numWorkers = runtime.NumCPU() * 2
+	}
+	if numWorkers > n {
+		numWorkers = n
+	}
+
+	chunkSize := (n + numWorkers - 1) / numWorkers
 	var wg sync.WaitGroup
 
-	for i := 0; i < 4; i++ {
+	for i := 0; i < numWorkers; i++ {
 		start := i * chunkSize
 		end := start + chunkSize
 		if end > n {

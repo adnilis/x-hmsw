@@ -217,8 +217,6 @@ func (bm *BackupManager) EnableAutoBackup(interval time.Duration) {
 	bm.autoBackup = true
 	bm.backupTimer = time.NewTimer(interval)
 
-	bm.logger.Info("auto backup enabled", "interval", interval)
-
 	go bm.autoBackupLoop(interval)
 }
 
@@ -232,8 +230,6 @@ func (bm *BackupManager) DisableAutoBackup() {
 
 	close(bm.stopChan)
 	bm.stopChan = make(chan struct{})
-
-	bm.logger.Info("auto backup disabled")
 }
 
 // autoBackupLoop 自动备份循环

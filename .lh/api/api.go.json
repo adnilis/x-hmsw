@@ -3,11 +3,23 @@
     "activeCommit": 0,
     "commits": [
         {
-            "activePatchIndex": 0,
+            "activePatchIndex": 3,
             "patches": [
                 {
                     "date": 1773204871383,
                     "content": "Index: \n===================================================================\n--- \n+++ \n"
+                },
+                {
+                    "date": 1773214868517,
+                    "content": "Index: \n===================================================================\n--- \n+++ \n@@ -279,9 +279,9 @@\n \t\t\tDistanceMetric: iface.Cosine,\r\n \t\t\tM:              16,\r\n \t\t\tEfConstruction: 200,\r\n \t\t\tMaxVectors:     1000000,\r\n-\t\t\tEmbeddingType:  types.EmbeddingBM25, // 默认使用BM25\r\n+\t\t\tEmbeddingType:  types.EmbeddingBM25L, // 默认使用BM25\r\n \t\t\tEmbeddingField: \"content\",           // 默认从Payload的content字段提取文本\r\n \t\t},\r\n \t\tautoSave:         true,\r\n \t\tautoSaveInterval: 30 * time.Second,\r\n"
+                },
+                {
+                    "date": 1773214883873,
+                    "content": "Index: \n===================================================================\n--- \n+++ \n@@ -279,10 +279,10 @@\n \t\t\tDistanceMetric: iface.Cosine,\r\n \t\t\tM:              16,\r\n \t\t\tEfConstruction: 200,\r\n \t\t\tMaxVectors:     1000000,\r\n-\t\t\tEmbeddingType:  types.EmbeddingBM25L, // 默认使用BM25\r\n-\t\t\tEmbeddingField: \"content\",            // 默认从Payload的content字段提取文本\r\n+\t\t\tEmbeddingType:  types.EmbeddingTFIDF, // 默认使用BM25\r\n+\t\t\tEmbeddingField: \"content\",           // 默认从Payload的content字段提取文本\r\n \t\t},\r\n \t\tautoSave:         true,\r\n \t\tautoSaveInterval: 30 * time.Second,\r\n \t}\r\n"
+                },
+                {
+                    "date": 1773214910139,
+                    "content": "Index: \n===================================================================\n--- \n+++ \n@@ -279,10 +279,10 @@\n \t\t\tDistanceMetric: iface.Cosine,\r\n \t\t\tM:              16,\r\n \t\t\tEfConstruction: 200,\r\n \t\t\tMaxVectors:     1000000,\r\n-\t\t\tEmbeddingType:  types.EmbeddingTFIDF, // 默认使用BM25\r\n-\t\t\tEmbeddingField: \"content\",            // 默认从Payload的content字段提取文本\r\n+\t\t\tEmbeddingType:  types.EmbeddingBM25, // 默认使用BM25\r\n+\t\t\tEmbeddingField: \"content\",           // 默认从Payload的content字段提取文本\r\n \t\t},\r\n \t\tautoSave:         true,\r\n \t\tautoSaveInterval: 30 * time.Second,\r\n \t}\r\n"
                 }
             ],
             "date": 1773204871383,

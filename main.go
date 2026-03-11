@@ -11,7 +11,6 @@ import (
 	"github.com/adnilis/logger"
 	"github.com/adnilis/x-hmsw/api"
 	iface "github.com/adnilis/x-hmsw/interface"
-	"github.com/adnilis/x-hmsw/types"
 )
 
 // ChatMessage 聊天消息结构
@@ -136,42 +135,25 @@ func main() {
 		}
 	}()
 
-	logger.Debug("========================================")
-	logger.Debug("   向量数据库 - 聊天记录管理演示")
-	logger.Debug("========================================\n")
-
 	// 1. 数据库初始化
-	logger.Debug("【步骤 1】初始化向量数据库...")
 	db, err := initializeDatabase()
 	if err != nil {
 		log.Fatalf("数据库初始化失败: %v", err)
 	}
 	defer db.Close()
-	logger.Debug("✓ 数据库初始化成功\n")
-
-	// 2. 保存聊天记录
-	logger.Debug("【步骤 2】保存聊天记录到向量数据库...")
-	err = saveChatHistory(db)
-	if err != nil {
-		log.Fatalf("保存聊天记录失败: %v", err)
-	}
-	logger.Debug("✓ 聊天记录保存成功\n")
 
 	// 3. 搜索测试
-	logger.Debug("【步骤 3】执行搜索测试...")
 	testSearch(db)
-	logger.Debug("✓ 搜索测试完成\n")
 
 	// 4. 高级过滤测试
 	testAdvancedFilters(db)
 
-	logger.Debug("========================================")
-	logger.Debug("   演示完成！")
-	logger.Debug("========================================")
+	logger.Info("   演示完成！")
 }
 
 // initializeDatabase 初始化向量数据库
 func initializeDatabase() (*api.QuickDB, error) {
+
 	// 使用构建器模式创建数据库
 	db, err := api.NewBuilder().
 		WithDimension(384).
@@ -184,60 +166,22 @@ func initializeDatabase() (*api.QuickDB, error) {
 		return nil, err
 	}
 
-	logger.Debug("  配置参数:\n")
-	logger.Debug("    - 维度: 384\n")
-	logger.Debug("    - 索引类型: HNSW\n")
-	logger.Debug("    - 距离度量: Cosine\n")
-	logger.Debug("    - 存储类型: Badger\n")
-	logger.Debug("    - 存储路径: ./data/chat_vectors\n")
-	logger.Debug("    - 最大向量数: 1000000\n")
-	logger.Debug("    - M 参数: 16\n")
-	logger.Debug("    - EfConstruction: 200\n")
-	logger.Debug("    - 自动保存: 30秒\n")
+	// 插入聊天消息数据
+	for i, msg := range chatHistory {
+		payload := map[string]interface{}{
+			"msg_id":    msg.ID,
+			"content":   msg.Content,
+			"role":      msg.Role,
+			"timestamp": msg.Timestamp,
+			"index":     i,
+		}
+		err := db.InsertWithText(fmt.Sprintf("msg_%03d", i+1), msg.Content, payload)
+		if err != nil {
+			return nil, fmt.Errorf("插入数据失败: %w", err)
+		}
+	}
 
 	return db, nil
-}
-
-// saveChatHistory 保存聊天记录到向量数据库
-func saveChatHistory(db *api.QuickDB) error {
-	logger.Debug("  准备保存 %d 条聊天记录...\n", len(chatHistory))
-
-	// 将聊天记录转换为向量（使用默认TF-IDF，不生成向量）
-	vectors := make([]types.Vector, 0, len(chatHistory))
-	for i, msg := range chatHistory {
-		// 使用数字 ID（HNSW 索引需要）
-		vec := types.Vector{
-			ID: fmt.Sprintf("%d", i), // 使用索引作为 ID
-			// 不设置Vector，让TF-IDF在第一次搜索时自动生成
-			Payload: map[string]interface{}{
-				"msg_id":    msg.ID, // 保存原始消息 ID
-				"role":      msg.Role,
-				"content":   msg.Content, // TF-IDF会使用这个字段
-				"timestamp": time.Now(),
-				"index":     i,
-			},
-		}
-		vectors = append(vectors, vec)
-	}
-
-	// 插入向量
-	start := time.Now()
-	if err := db.Insert(vectors); err != nil {
-		return fmt.Errorf("插入向量失败: %w", err)
-	}
-	elapsed := time.Since(start)
-
-	logger.Debug("  ✓ 成功保存 %d 条聊天记录\n", len(vectors))
-	logger.Debug("  ✓ 耗时: %v\n", elapsed)
-	logger.Debug("  ✓ 平均速度: %.2f 条/秒\n", float64(len(vectors))/elapsed.Seconds())
-
-	// 显示统计信息
-	count, err := db.Count()
-	if err == nil {
-		logger.Debug("  ✓ 数据库当前向量总数: %d\n", count)
-	}
-
-	return nil
 }
 
 // testSearch 执行搜索测试
@@ -312,11 +256,10 @@ func testSearch(db *api.QuickDB) {
 	}
 
 	for _, test := range testQueries {
-		logger.Debug("\n  【测试】%s\n", test.name)
-		logger.Debug("  查询: \"%s\"\n", test.query)
+		logger.Info("测试: %s, 查询: %s", test.name, test.query)
 
 		if test.filter != nil {
-			logger.Debug("  过滤条件: %v\n", test.filter)
+			logger.Debug("过滤条件: %v", test.filter)
 		}
 
 		// 执行搜索（使用SearchByText，TF-IDF会自动生成向量）
@@ -333,18 +276,16 @@ func testSearch(db *api.QuickDB) {
 		}
 
 		if err != nil {
-			logger.Debug("  ✗ 搜索失败: %v\n", err)
+			logger.Error("搜索失败: %v", err)
 			continue
 		}
 		elapsed := time.Since(start)
 
-		logger.Debug("  搜索耗时: %v\n", elapsed)
-		logger.Debug("  找到 %d 个结果:\n", len(results))
+		logger.Info("搜索耗时: %v, 找到 %d 个结果", elapsed, len(results))
 
-		for i, result := range results {
+		for _, result := range results {
 			// 检查 Payload 是否存在
 			if result.Payload == nil {
-				logger.Debug("    %d. [%.4f] ID=%s (无负载信息)\n", i+1, result.Score, result.ID)
 				continue
 			}
 
@@ -367,16 +308,14 @@ func testSearch(db *api.QuickDB) {
 				msgID = mid
 			}
 
-			logger.Debug("    %d. [%.4f] [%s] %s: %s\n", i+1, result.Score, msgID, role, content)
+			logger.Debug("[%.4f] [%s] %s: %s", result.Score, msgID, role, content)
 		}
 	}
 }
 
 // testAdvancedFilters 测试高级过滤功能
 func testAdvancedFilters(db *api.QuickDB) {
-	logger.Debug("\n========================================")
-	logger.Debug("   高级过滤功能测试")
-	logger.Debug("========================================\n")
+	logger.Info("高级过滤功能测试")
 
 	// 获取当前时间
 	now := time.Now()
@@ -487,25 +426,22 @@ func testAdvancedFilters(db *api.QuickDB) {
 	}
 
 	for _, test := range advancedTests {
-		logger.Debug("\n  【测试】%s\n", test.name)
-		logger.Debug("  查询: \"%s\"\n", test.query)
-		logger.Debug("  过滤条件: %v\n", test.filter)
+		logger.Info("测试: %s, 查询: %s", test.name, test.query)
+		logger.Debug("过滤条件: %v", test.filter)
 
 		// 执行搜索（使用SearchByTextWithFilter，TF-IDF会自动生成向量）
 		start := time.Now()
 		results, err := db.SearchByTextWithFilter(test.query, test.topK, test.filter)
 		if err != nil {
-			logger.Debug("  ✗ 搜索失败: %v\n", err)
+			logger.Error("搜索失败: %v", err)
 			continue
 		}
 		elapsed := time.Since(start)
 
-		logger.Debug("  搜索耗时: %v\n", elapsed)
-		logger.Debug("  找到 %d 个结果:\n", len(results))
+		logger.Info("搜索耗时: %v, 找到 %d 个结果", elapsed, len(results))
 
-		for i, result := range results {
+		for _, result := range results {
 			if result.Payload == nil {
-				logger.Debug("    %d. [%.4f] ID=%s (无负载信息)\n", i+1, result.Score, result.ID)
 				continue
 			}
 
@@ -532,7 +468,7 @@ func testAdvancedFilters(db *api.QuickDB) {
 				index = idx
 			}
 
-			logger.Debug("    %d. [%.4f] [%s] index=%d %s: %s\n", i+1, result.Score, msgID, index, role, content)
+			logger.Debug("[%.4f] [%s] index=%d %s: %s", result.Score, msgID, index, role, content)
 		}
 	}
 }

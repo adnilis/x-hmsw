@@ -243,7 +243,6 @@ func (db *PureGoVectorDB) Insert(vectors []Vector) error {
 			for i, idx := range indicesToEmbed {
 				if i < len(embeddings) {
 					storageVectors[idx].Vector = embeddings[i]
-					db.logger.Debug("generated embedding for vector", "id", storageVectors[idx].ID, "dimension", len(embeddings[i]))
 				}
 			}
 		}
@@ -266,12 +265,10 @@ func (db *PureGoVectorDB) Insert(vectors []Vector) error {
 				}
 
 				vec.Vector = embedding
-				db.logger.Debug("generated embedding for vector", "id", vec.ID, "dimension", len(embedding))
 			}
 		}
 	} else {
 		// 没有设置embedding函数，允许空向量（将在搜索时初始化TF-IDF）
-		db.logger.Debug("no embedding function set, vectors will be generated on first search")
 	}
 
 	if err := db.storage.BatchPut(storageVectors); err != nil {
@@ -535,10 +532,6 @@ func (db *PureGoVectorDB) EnableAutoSave(interval time.Duration, savePath string
 	db.savePath = savePath
 	db.autoSaveDone = make(chan struct{})
 
-	db.logger.Info("auto save enabled",
-		"interval", interval,
-		"path", savePath)
-
 	// 启动自动保存循环
 	go db.autoSaveLoop(interval)
 
@@ -559,7 +552,6 @@ func (db *PureGoVectorDB) DisableAutoSave() error {
 	}
 
 	db.disableAutoSave()
-	db.logger.Info("auto save disabled")
 
 	return nil
 }
@@ -583,7 +575,6 @@ func (db *PureGoVectorDB) SetEmbeddingFunc(fn embedding.EmbeddingFunc) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 	db.embeddingFunc = fn
-	db.logger.Info("embedding function set")
 }
 
 // GetEmbeddingFunc 获取Embedding函数
@@ -598,7 +589,6 @@ func (db *PureGoVectorDB) SetBatchEmbeddingFunc(fn embedding.BatchEmbeddingFunc)
 	db.mu.Lock()
 	defer db.mu.Unlock()
 	db.batchEmbeddingFunc = fn
-	db.logger.Info("batch embedding function set")
 }
 
 // GetBatchEmbeddingFunc 获取批量Embedding函数
@@ -751,15 +741,11 @@ func (db *PureGoVectorDB) autoSaveLoop(interval time.Duration) {
 
 			// 只有脏数据才保存
 			if db.dirty {
-				db.logger.Info("auto saving database", "path", db.savePath)
 				if err := db.storage.Save(db.savePath); err != nil {
 					db.logger.Error("auto save failed", "error", err)
 				} else {
 					db.dirty = false
-					db.logger.Info("auto save completed")
 				}
-			} else {
-				db.logger.Debug("no dirty data, skipping auto save")
 			}
 
 			db.mu.Unlock()

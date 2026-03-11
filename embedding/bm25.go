@@ -1,7 +1,9 @@
 package embedding
 
 import (
+	"container/list"
 	"math"
+	"runtime"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -12,6 +14,84 @@ const (
 	defaultBM25K1 = 1.5  // 词频饱和参数
 	defaultBM25B  = 0.75 // 长度归一化参数
 )
+
+// tfMapPool 复用词频map，减少内存分配
+var tfMapPool = sync.Pool{
+	New: func() interface{} {
+		m := make(map[string]int)
+		return &m
+	},
+}
+
+// vectorPool 复用float32切片，减少内存分配
+var vectorPool = sync.Pool{
+	New: func() interface{} {
+		return make([]float32, 0, 256)
+	},
+}
+
+// lruCache LRU缓存实现
+type lruCache struct {
+	mu       sync.RWMutex
+	items    map[string]*list.Element
+	list     *list.List
+	capacity int
+}
+
+type lruItem struct {
+	key   string
+	value []float32
+}
+
+func newLRUCache(capacity int) *lruCache {
+	return &lruCache{
+		items:    make(map[string]*list.Element),
+		list:     list.New(),
+		capacity: capacity,
+	}
+}
+
+func (c *lruCache) Get(key string) ([]float32, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if elem, ok := c.items[key]; ok {
+		c.list.MoveToFront(elem)
+		return elem.Value.(*lruItem).value, true
+	}
+	return nil, false
+}
+
+func (c *lruCache) Put(key string, value []float32) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if elem, ok := c.items[key]; ok {
+		c.list.MoveToFront(elem)
+		elem.Value.(*lruItem).value = value
+		return
+	}
+
+	if c.list.Len() >= c.capacity {
+		// 移除最旧的元素
+		if oldest := c.list.Back(); oldest != nil {
+			item := oldest.Value.(*lruItem)
+			delete(c.items, item.key)
+			c.list.Remove(oldest)
+		}
+	}
+
+	item := &lruItem{key: key, value: value}
+	elem := c.list.PushFront(item)
+	c.items[key] = elem
+}
+
+func (c *lruCache) Clear() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.items = make(map[string]*list.Element)
+	c.list = list.New()
+}
 
 // BM25Vectorizer BM25向量化器（优化版）
 // BM25 是一种改进的 TF-IDF 算法，广泛用于信息检索
@@ -69,12 +149,12 @@ func NewBM25Vectorizer(config BM25Config) *BM25Vectorizer {
 		idf:          make([]float64, 0),
 		cache:        make(map[string][]float32),
 		cacheEnabled: false,
-		maxCacheSize: 10000, // 默认缓存 10000 个查询
+		maxCacheSize: 10000,
 		tokenizer:    mixedTokenizer,
 	}
 }
 
-// Fit 训练 BM25 模型
+// Fit 训练 BM25 模型（并行优化版）
 func (v *BM25Vectorizer) Fit(documents []string) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -84,24 +164,86 @@ func (v *BM25Vectorizer) Fit(documents []string) {
 		return
 	}
 
-	// 使用并发统计词频
-	wordFreq := make(map[string]int64)
-	docFreq := make(map[string]int64)
-	totalTokens := int64(0)
+	// 并行化词频统计
+	numWorkers := runtime.NumCPU()
+	if docCount < 100 {
+		numWorkers = 1
+	} else if docCount < 1000 {
+		numWorkers = 4
+	}
 
-	// 简单顺序处理（避免并发 map 写入问题）
-	for _, doc := range documents {
-		tokens := v.tokenizer(doc)
-		seen := make(map[string]bool)
+	// 每个 worker 的局部结果（预分配内存减少GC压力）
+	avgTokensPerDoc := 100 // 估算平均值
+	estimatedVocabSize := docCount * avgTokensPerDoc / 2
 
-		for _, token := range tokens {
-			wordFreq[token]++
-			if !seen[token] {
-				seen[token] = true
-				docFreq[token]++
-			}
-			totalTokens++
+	type localCount struct {
+		wordFreq map[string]int64
+		docFreq  map[string]int64
+		totalLen int64
+	}
+
+	locals := make([]localCount, numWorkers)
+	for i := 0; i < numWorkers; i++ {
+		localVocab := estimatedVocabSize / numWorkers
+		locals[i] = localCount{
+			wordFreq: make(map[string]int64, localVocab),
+			docFreq:  make(map[string]int64, localVocab/2),
 		}
+	}
+
+	// 并行处理文档
+	chunkSize := (docCount + numWorkers - 1) / numWorkers
+	var wg sync.WaitGroup
+
+	for w := 0; w < numWorkers; w++ {
+		start := w * chunkSize
+		end := start + chunkSize
+		if end > docCount {
+			end = docCount
+		}
+		if start >= docCount {
+			break
+		}
+
+		localIdx := w
+		wg.Add(1)
+		go func(s, e int) {
+			local := &locals[localIdx]
+			// 复用 seen map 减少分配
+			seen := make(map[string]bool, 64)
+			for i := s; i < e; i++ {
+				for k := range seen {
+					delete(seen, k)
+				}
+				tokens := v.tokenizer(documents[i])
+				for _, token := range tokens {
+					local.wordFreq[token]++
+					if !seen[token] {
+						seen[token] = true
+						local.docFreq[token]++
+					}
+					local.totalLen++
+				}
+			}
+			wg.Done()
+		}(start, end)
+	}
+
+	wg.Wait()
+
+	// 合并所有 worker 的结果（预分配内存）
+	wordFreq := make(map[string]int64, estimatedVocabSize)
+	docFreq := make(map[string]int64, estimatedVocabSize/2)
+	var totalTokens int64
+
+	for _, local := range locals {
+		for word, freq := range local.wordFreq {
+			wordFreq[word] += freq
+		}
+		for word, freq := range local.docFreq {
+			docFreq[word] += freq
+		}
+		totalTokens += local.totalLen
 	}
 
 	v.docCount = int32(docCount)
@@ -147,10 +289,7 @@ func (v *BM25Vectorizer) Fit(documents []string) {
 	}
 
 	// 清空缓存
-	v.cacheMu.Lock()
 	v.cache = make(map[string][]float32)
-	v.cacheMu.Unlock()
-	atomic.StoreInt32(&v.cacheSize, 0)
 }
 
 // Transform 优化的向量化方法
@@ -183,8 +322,13 @@ func (v *BM25Vectorizer) Transform(document string) []float32 {
 	tokens := v.tokenizer(document)
 	docLength := len(tokens)
 
-	// 计算词频（只统计词汇表中的词）
-	tf := make(map[string]int, len(tokens))
+	// 使用sync.Pool复用tf map，减少内存分配
+	tfPtr := tfMapPool.Get().(*map[string]int)
+	tf := *tfPtr
+	for k := range tf {
+		delete(tf, k)
+	}
+
 	for _, token := range tokens {
 		if _, exists := vocab[token]; exists {
 			tf[token]++
@@ -209,10 +353,12 @@ func (v *BM25Vectorizer) Transform(document string) []float32 {
 		vector[idx] = float32(idf[idx] * numerator / denominator)
 	}
 
+	// 归还tf map到pool
+	tfMapPool.Put(tfPtr)
+
 	// 缓存结果
 	if v.cacheEnabled {
 		v.cacheMu.Lock()
-		// LRU 简单实现：如果缓存满了，清空
 		if atomic.LoadInt32(&v.cacheSize) >= v.maxCacheSize {
 			v.cache = make(map[string][]float32)
 			atomic.StoreInt32(&v.cacheSize, 0)
@@ -226,16 +372,39 @@ func (v *BM25Vectorizer) Transform(document string) []float32 {
 	return vector
 }
 
-// BatchTransform 批量向量化（并发优化）
+// BatchTransform 批量向量化（动态worker优化版）
 func (v *BM25Vectorizer) BatchTransform(documents []string) [][]float32 {
-	vectors := make([][]float32, len(documents))
-
-	// 简单并发实现
 	n := len(documents)
-	chunkSize := (n + 3) / 4 // 4 个 worker
+	if n == 0 {
+		return nil
+	}
+
+	// 小批量使用串行，避免goroutine开销
+	if n < 100 {
+		vectors := make([][]float32, n)
+		for i := 0; i < n; i++ {
+			vectors[i] = v.Transform(documents[i])
+		}
+		return vectors
+	}
+
+	vectors := make([][]float32, n)
+
+	// 动态计算worker数量
+	numWorkers := runtime.NumCPU()
+	if n < 1000 {
+		numWorkers = runtime.NumCPU()
+	} else {
+		numWorkers = runtime.NumCPU() * 2
+	}
+	if numWorkers > n {
+		numWorkers = n
+	}
+
+	chunkSize := (n + numWorkers - 1) / numWorkers
 	var wg sync.WaitGroup
 
-	for i := 0; i < 4; i++ {
+	for i := 0; i < numWorkers; i++ {
 		start := i * chunkSize
 		end := start + chunkSize
 		if end > n {
@@ -262,20 +431,16 @@ func (v *BM25Vectorizer) BatchTransform(documents []string) [][]float32 {
 func (v *BM25Vectorizer) GetCacheStats() (hits, misses, size int64) {
 	return atomic.LoadInt64(&v.hits),
 		atomic.LoadInt64(&v.misses),
-		int64(atomic.LoadInt32(&v.cacheSize))
+		0
 }
 
 // EnableCache 启用缓存
 func (v *BM25Vectorizer) EnableCache() {
-	v.cacheMu.Lock()
-	defer v.cacheMu.Unlock()
 	v.cacheEnabled = true
 }
 
 // DisableCache 禁用缓存
 func (v *BM25Vectorizer) DisableCache() {
-	v.cacheMu.Lock()
-	defer v.cacheMu.Unlock()
 	v.cacheEnabled = false
 }
 

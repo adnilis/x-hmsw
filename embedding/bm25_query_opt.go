@@ -1,8 +1,9 @@
-﻿package embedding
+package embedding
 
 import (
 	"container/heap"
 	"math"
+	"runtime"
 	"sort"
 	"sync"
 	"time"
@@ -16,6 +17,43 @@ type SearchResult struct {
 	Rank  int
 }
 
+// PrecomputedVectors 预计算的向量集合
+type PrecomputedVectors struct {
+	vectors [][]float32
+	mu      sync.RWMutex
+}
+
+// NewPrecomputedVectors 创建预计算向量容器
+func NewPrecomputedVectors(capacity int) *PrecomputedVectors {
+	return &PrecomputedVectors{
+		vectors: make([][]float32, 0, capacity),
+	}
+}
+
+// SetVectors 设置预计算的向量
+func (p *PrecomputedVectors) SetVectors(vectors [][]float32) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.vectors = vectors
+}
+
+// Get 获取指定索引的向量
+func (p *PrecomputedVectors) Get(idx int) []float32 {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if idx >= 0 && idx < len(p.vectors) {
+		return p.vectors[idx]
+	}
+	return nil
+}
+
+// Len 返回向量数量
+func (p *PrecomputedVectors) Len() int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return len(p.vectors)
+}
+
 // QueryOptimizer 浼樺寲鍚庣殑鏌ヨ浼樺寲鍣?
 type QueryOptimizer struct {
 	vectorizer  *BM25Vectorizer
@@ -23,6 +61,7 @@ type QueryOptimizer struct {
 	minScore    float32
 	cache       map[string][]float32 // 鏌ヨ缂撳瓨
 	docVecCache map[int][]float32    // 鏂囨。鍚戦噺缂撳瓨
+	precomputed *PrecomputedVectors  // 预计算向量（核心优化）
 	useCache    bool
 	mu          sync.RWMutex
 	stats       QueryOptimizerStats
@@ -44,8 +83,64 @@ func NewQueryOptimizer(vectorizer *BM25Vectorizer) *QueryOptimizer {
 		minScore:    0.0,
 		cache:       make(map[string][]float32),
 		docVecCache: make(map[int][]float32),
+		precomputed: NewPrecomputedVectors(0),
 		useCache:    true,
 	}
+}
+
+// PrecomputeDocVectors 预计算所有文档的向量（核心优化）
+// 这避免了搜索时重复对每个文档进行向量化
+func (o *QueryOptimizer) PrecomputeDocVectors(documents []string) {
+	if len(documents) == 0 {
+		return
+	}
+	vectors := o.vectorizer.BatchTransform(documents)
+	o.precomputed.SetVectors(vectors)
+}
+
+// PrecomputeDocVectorsWithPool 使用对象池预计算向量
+func (o *QueryOptimizer) PrecomputeDocVectorsWithPool(documents []string, pool *sync.Pool) {
+	if len(documents) == 0 {
+		return
+	}
+	n := len(documents)
+	vectors := make([][]float32, n)
+
+	// 使用并发加速
+	numWorkers := runtime.NumCPU()
+	if n < 100 {
+		numWorkers = 1
+	}
+
+	chunkSize := (n + numWorkers - 1) / numWorkers
+	var wg sync.WaitGroup
+
+	for w := 0; w < numWorkers; w++ {
+		start := w * chunkSize
+		end := start + chunkSize
+		if end > n {
+			end = n
+		}
+		if start >= n {
+			break
+		}
+
+		wg.Add(1)
+		go func(s, e int) {
+			defer wg.Done()
+			for i := s; i < e; i++ {
+				vectors[i] = o.vectorizer.Transform(documents[i])
+			}
+		}(start, end)
+	}
+
+	wg.Wait()
+	o.precomputed.SetVectors(vectors)
+}
+
+// ClearPrecomputedVectors 清除预计算的向量
+func (o *QueryOptimizer) ClearPrecomputedVectors() {
+	o.precomputed.SetVectors(nil)
 }
 
 // SetMaxResults 璁剧疆鏈€澶х粨鏋滄暟
@@ -85,6 +180,7 @@ func (o *QueryOptimizer) GetStats() QueryOptimizerStats {
 }
 
 // TopKSearch 浼樺寲鐨?Top-K 鎼滅储
+// 优化：优先使用预计算的向量，避免重复向量化
 func (o *QueryOptimizer) TopKSearch(query string, documents []string, k int) []SearchResult {
 	start := time.Now()
 
@@ -92,13 +188,14 @@ func (o *QueryOptimizer) TopKSearch(query string, documents []string, k int) []S
 	maxK := o.maxResults
 	minScore := o.minScore
 	useCache := o.useCache
+	precomputed := o.precomputed
 	o.mu.RUnlock()
 
 	if k > maxK {
 		k = maxK
 	}
 
-	// 浠庣紦瀛樿幏鍙栨煡璇㈠悜閲?
+	// 浠庣紦瀛樿幏鍙栨煡璇㈠悜参阅?
 	var queryVec []float32
 	if useCache {
 		o.mu.RLock()
@@ -122,44 +219,63 @@ func (o *QueryOptimizer) TopKSearch(query string, documents []string, k int) []S
 		return []SearchResult{}
 	}
 
-	// 浣跨敤蹇€熼€夋嫨绠楁硶鑰屼笉鏄爢
+	docCount := len(documents)
 	scores := make([]struct {
 		id    int
 		score float32
-	}, len(documents))
+	}, docCount)
 
-	for i, doc := range documents {
-		var docVec []float32
+	// 核心优化：优先使用预计算的向量
+	precomputedLen := precomputed.Len()
 
-		// 浣跨敤鏂囨。鍚戦噺缂撳瓨
-		if useCache {
-			o.mu.RLock()
-			if cached, ok := o.docVecCache[i]; ok {
-				docVec = cached
-				o.mu.RUnlock()
-			} else {
-				o.mu.RUnlock()
-				docVec = o.vectorizer.Transform(doc)
-				o.mu.Lock()
-				o.docVecCache[i] = docVec
-				o.mu.Unlock()
+	if precomputedLen > 0 && precomputedLen == docCount {
+		// 使用预计算的向量（最快路径）
+		for i := 0; i < docCount; i++ {
+			docVec := precomputed.Get(i)
+			if docVec == nil || len(docVec) == 0 {
+				continue
 			}
-		} else {
-			docVec = o.vectorizer.Transform(doc)
+			score := o.cosineSimilarity(queryVec, docVec)
+			scores[i] = struct {
+				id    int
+				score float32
+			}{i, score}
 		}
+	} else {
+		// 回退到原有逻辑
+		for i, doc := range documents {
+			var docVec []float32
 
-		if len(docVec) == 0 {
-			continue
+			// 浣跨敤鏂囨。鍚戦噺缂撳瓨
+			if useCache {
+				o.mu.RLock()
+				if cached, ok := o.docVecCache[i]; ok {
+					docVec = cached
+					o.mu.RUnlock()
+				} else {
+					o.mu.RUnlock()
+					docVec = o.vectorizer.Transform(doc)
+					o.mu.Lock()
+					o.docVecCache[i] = docVec
+					o.mu.Unlock()
+				}
+			} else {
+				docVec = o.vectorizer.Transform(doc)
+			}
+
+			if len(docVec) == 0 {
+				continue
+			}
+
+			score := o.cosineSimilarity(queryVec, docVec)
+			scores[i] = struct {
+				id    int
+				score float32
+			}{i, score}
 		}
-
-		score := o.cosineSimilarity(queryVec, docVec)
-		scores[i] = struct {
-			id    int
-			score float32
-		}{i, score}
 	}
 
-	// 蹇€熼€夋嫨 Top-K
+	// 蹇骞€閽夋嫨 Top-K
 	o.mu.RLock()
 	result := o.quickSelectTopK(scores, k, minScore)
 	o.mu.RUnlock()
