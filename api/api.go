@@ -229,6 +229,16 @@ func (q *QuickDB) Count() (int, error) {
 	return q.db.Count()
 }
 
+// GetByID 根据ID获取向量
+func (q *QuickDB) GetByID(id string) (*types.Vector, error) {
+	return q.db.GetByID(id)
+}
+
+// BatchGetByID 根据ID列表批量获取向量
+func (q *QuickDB) BatchGetByID(ids []string) ([]*types.Vector, error) {
+	return q.db.BatchGetByID(ids)
+}
+
 // Save 手动保存数据库
 func (q *QuickDB) Save(path string) error {
 	return q.db.ForceSave(path)

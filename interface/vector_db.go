@@ -19,6 +19,8 @@ type VectorDB interface {
 	Insert(vectors []Vector) error
 	Delete(ids []string) error
 	Search(query Vector, opts SearchOptions) ([]SearchResult, error)
+	GetByID(id string) (*Vector, error)
+	BatchGetByID(ids []string) ([]*Vector, error)
 	Save(path string) error
 	Load(path string) error
 	Close() error
@@ -458,6 +460,30 @@ func (db *PureGoVectorDB) Count() (int, error) {
 	}
 
 	return db.storage.Count()
+}
+
+// GetByID 根据ID获取向量
+func (db *PureGoVectorDB) GetByID(id string) (*Vector, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	if db.closed {
+		return nil, fmt.Errorf("database is closed")
+	}
+
+	return db.storage.Get(id)
+}
+
+// BatchGetByID 根据ID列表批量获取向量
+func (db *PureGoVectorDB) BatchGetByID(ids []string) ([]*Vector, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	if db.closed {
+		return nil, fmt.Errorf("database is closed")
+	}
+
+	return db.storage.BatchGet(ids)
 }
 
 // Close 关闭数据库
