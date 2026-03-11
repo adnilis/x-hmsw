@@ -1,0 +1,44 @@
+syntax = "proto3";
+
+package protobuf;
+
+option go_package = "github.com/adnilis/x-hmsw/serialization/protobuf";
+
+// CoarseIndexMetadata 粗粒度索引元数据
+message CoarseIndexMetadataPB {
+  int32 total_vectors = 1;
+  int32 total_pages = 2;
+  int32 page_size = 3;
+  int32 max_pages = 4;
+  bool use_pq = 5;
+  int32 pq_subspaces = 6;
+  int32 pq_centroids = 7;
+  map<int32, int32> page_map = 8;  // vector_id -> page_index
+  int64 last_modified = 9;
+}
+
+// PageData 页面数据
+message PageDataPB {
+  int32 page_id = 1;
+  map<int32, VectorDataPB> vectors = 2;  // vector_id -> vector_data
+  map<int32, bytes> quantized = 3;       // vector_id -> quantized_data
+  int64 last_access = 4;
+  bool loaded = 5;
+}
+
+// VectorDataPB 向量数据
+message VectorDataPB {
+  repeated float vector = 1;
+}
+
+// PageDirtyMap 页面脏标记映射（用于增量保存）
+message PageDirtyMapPB {
+  repeated int32 dirty_pages = 1;
+  int64 last_save_time = 2;
+}
+
+// CoarseIndexSnapshot 粗粒度索引快照（用于完整保存）
+message CoarseIndexSnapshotPB {
+  CoarseIndexMetadataPB metadata = 1;
+  repeated PageDataPB pages = 2;
+}

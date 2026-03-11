@@ -1,0 +1,314 @@
+package embedding
+
+import (
+	"math"
+	"sort"
+	"sync"
+	"sync/atomic"
+
+	"github.com/adnilis/x-hmsw/types"
+)
+
+// BM25PlusVectorizer BM25+ 向量化器（优化版）
+// BM25+ 是处理负 IDF 值的 BM25 变体
+// 优化特性：
+// - 使用切片代替 map 存储 IDF，提升访问性能
+// - 支持查询结果缓存
+type BM25PlusVectorizer struct {
+	config       BM25Config
+	vocabulary   map[string]int
+	idf          []float64
+	docCount     int32
+	avgDocLength float64
+	docLengths   []int
+
+	mu        sync.RWMutex
+	tokenizer func(string) []string
+
+	cache        map[string][]float32
+	cacheMu      sync.RWMutex
+	cacheEnabled bool
+	cacheSize    int32
+	maxCacheSize int32
+
+	delta  float64 // BM25+ 的 delta 参数
+	hits   int64
+	misses int64
+}
+
+// NewBM25PlusVectorizer 创建 BM25+ 向量化器
+func NewBM25PlusVectorizer(config BM25Config) *BM25PlusVectorizer {
+	if config.MaxVocabSize <= 0 {
+		config.MaxVocabSize = defaultMaxVocabSize
+	}
+	if config.MinDocFreq < 1 {
+		config.MinDocFreq = defaultMinDocFreq
+	}
+	if config.MaxDocFreq <= 0 || config.MaxDocFreq > 1.0 {
+		config.MaxDocFreq = defaultMaxDocFreq
+	}
+	if config.K1 <= 0 {
+		config.K1 = defaultBM25K1
+	}
+	if config.B < 0 || config.B > 1 {
+		config.B = defaultBM25B
+	}
+	if config.Delta <= 0 {
+		config.Delta = 1.0
+	}
+	if config.Variant != types.EmbeddingBM25P {
+		config.Variant = types.EmbeddingBM25P
+	}
+
+	return &BM25PlusVectorizer{
+		config:       config,
+		vocabulary:   make(map[string]int),
+		idf:          make([]float64, 0),
+		cache:        make(map[string][]float32),
+		cacheEnabled: false,
+		maxCacheSize: 10000,
+		delta:        config.Delta, // 使用配置中的 delta
+		tokenizer:    mixedTokenizer,
+	}
+}
+
+// SetDelta 设置 delta 参数
+func (v *BM25PlusVectorizer) SetDelta(delta float64) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.delta = delta
+}
+
+// Fit 训练
+func (v *BM25PlusVectorizer) Fit(documents []string) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
+	docCount := len(documents)
+	if docCount == 0 {
+		return
+	}
+
+	wordFreq := make(map[string]int64)
+	docFreq := make(map[string]int64)
+	totalLength := int64(0)
+	v.docLengths = make([]int, docCount)
+
+	for i, doc := range documents {
+		tokens := v.tokenizer(doc)
+		v.docLengths[i] = len(tokens)
+		totalLength += int64(len(tokens))
+
+		seen := make(map[string]bool)
+		for _, token := range tokens {
+			wordFreq[token]++
+			if !seen[token] {
+				seen[token] = true
+				docFreq[token]++
+			}
+		}
+	}
+
+	v.docCount = int32(docCount)
+	v.avgDocLength = float64(totalLength) / float64(docCount)
+
+	type wordInfo struct {
+		word string
+		df   int64
+	}
+
+	words := make([]wordInfo, 0, len(wordFreq))
+	for word, df := range docFreq {
+		if df >= int64(v.config.MinDocFreq) &&
+			float64(df)/float64(docCount) <= v.config.MaxDocFreq {
+			words = append(words, wordInfo{word: word, df: df})
+		}
+	}
+
+	sort.Slice(words, func(i, j int) bool {
+		return wordFreq[words[i].word] > wordFreq[words[j].word]
+	})
+
+	maxSize := v.config.MaxVocabSize
+	if len(words) > maxSize {
+		words = words[:maxSize]
+	}
+
+	v.vocabulary = make(map[string]int, len(words))
+	v.idf = make([]float64, len(words))
+
+	for i, w := range words {
+		v.vocabulary[w.word] = i
+		df := float64(w.df)
+		// BM25+ IDF 公式（确保正值）
+		v.idf[i] = math.Log((float64(docCount)-df+0.5)/(df+0.5)+1) + v.delta
+	}
+
+	v.cacheMu.Lock()
+	v.cache = make(map[string][]float32)
+	v.cacheMu.Unlock()
+	atomic.StoreInt32(&v.cacheSize, 0)
+}
+
+// Transform 向量化
+func (v *BM25PlusVectorizer) Transform(document string) []float32 {
+	if v.cacheEnabled {
+		v.cacheMu.RLock()
+		if cached, ok := v.cache[document]; ok {
+			v.cacheMu.RUnlock()
+			atomic.AddInt64(&v.hits, 1)
+			return cached
+		}
+		v.cacheMu.RUnlock()
+	}
+
+	v.mu.RLock()
+	vocabSize := len(v.vocabulary)
+	k1 := v.config.K1
+	b := v.config.B
+	avgDocLength := v.avgDocLength
+	idf := v.idf
+	vocab := v.vocabulary
+	v.mu.RUnlock()
+
+	if vocabSize == 0 {
+		return []float32{}
+	}
+
+	tokens := v.tokenizer(document)
+	docLength := len(tokens)
+
+	tf := make(map[string]int, len(tokens))
+	for _, token := range tokens {
+		if _, exists := vocab[token]; exists {
+			tf[token]++
+		}
+	}
+
+	lengthNorm := 1.0 - b
+	if avgDocLength > 0 {
+		lengthNorm += b * float64(docLength) / avgDocLength
+	}
+
+	vector := make([]float32, vocabSize)
+	for word, count := range tf {
+		idx := vocab[word]
+		numerator := float64(count) * (k1 + 1)
+		denominator := float64(count) + k1*lengthNorm
+		// BM25+ 确保分数为正
+		score := idf[idx] * numerator / denominator
+		if score < 0 {
+			score = 0
+		}
+		vector[idx] = float32(score)
+	}
+
+	if v.cacheEnabled {
+		v.cacheMu.Lock()
+		if atomic.LoadInt32(&v.cacheSize) >= v.maxCacheSize {
+			v.cache = make(map[string][]float32)
+			atomic.StoreInt32(&v.cacheSize, 0)
+		}
+		v.cache[document] = vector
+		atomic.AddInt32(&v.cacheSize, 1)
+		v.cacheMu.Unlock()
+		atomic.AddInt64(&v.misses, 1)
+	}
+
+	return vector
+}
+
+// BatchTransform 批量处理
+func (v *BM25PlusVectorizer) BatchTransform(documents []string) [][]float32 {
+	vectors := make([][]float32, len(documents))
+
+	n := len(documents)
+	chunkSize := (n + 3) / 4
+	var wg sync.WaitGroup
+
+	for i := 0; i < 4; i++ {
+		start := i * chunkSize
+		end := start + chunkSize
+		if end > n {
+			end = n
+		}
+		if start >= n {
+			break
+		}
+
+		wg.Add(1)
+		go func(s, e int) {
+			defer wg.Done()
+			for j := s; j < e; j++ {
+				vectors[j] = v.Transform(documents[j])
+			}
+		}(start, end)
+	}
+
+	wg.Wait()
+	return vectors
+}
+
+// EnableCache 启用缓存
+func (v *BM25PlusVectorizer) EnableCache() {
+	v.cacheMu.Lock()
+	defer v.cacheMu.Unlock()
+	v.cacheEnabled = true
+}
+
+// DisableCache 禁用缓存
+func (v *BM25PlusVectorizer) DisableCache() {
+	v.cacheMu.Lock()
+	defer v.cacheMu.Unlock()
+	v.cacheEnabled = false
+}
+
+// GetCacheStats 获取统计
+func (v *BM25PlusVectorizer) GetCacheStats() (hits, misses, size int64) {
+	return atomic.LoadInt64(&v.hits),
+		atomic.LoadInt64(&v.misses),
+		int64(atomic.LoadInt32(&v.cacheSize))
+}
+
+// GetDimension 获取向量维度
+func (v *BM25PlusVectorizer) GetDimension() int {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	return len(v.vocabulary)
+}
+
+// CreateEmbeddingFunc 创建Embedding函数
+func (v *BM25PlusVectorizer) CreateEmbeddingFunc() EmbeddingFunc {
+	return func(text string) ([]float32, error) {
+		vector := v.Transform(text)
+		if len(vector) == 0 {
+			return nil, nil
+		}
+		return vector, nil
+	}
+}
+
+// CreateBatchEmbeddingFunc 创建批量Embedding函数
+func (v *BM25PlusVectorizer) CreateBatchEmbeddingFunc() BatchEmbeddingFunc {
+	return func(texts []string) ([][]float32, error) {
+		vectors := make([][]float32, len(texts))
+		for i, text := range texts {
+			vectors[i] = v.Transform(text)
+		}
+		return vectors, nil
+	}
+}
+
+// GetVocabularySize 获取词汇表大小
+func (v *BM25PlusVectorizer) GetVocabularySize() int {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	return len(v.vocabulary)
+}
+
+// GetAvgDocLength 获取平均文档长度
+func (v *BM25PlusVectorizer) GetAvgDocLength() float64 {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	return v.avgDocLength
+}
