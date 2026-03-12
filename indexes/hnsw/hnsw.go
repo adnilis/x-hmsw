@@ -182,6 +182,19 @@ func (h *HNSWGraph) Insert(id int, vector []float32) *Node {
 
 // 搜索最近邻
 func (h *HNSWGraph) Search(query []float32, k int) []SearchResult {
+	return h.SearchWithEf(query, k, h.EfSearch)
+}
+
+// SearchWithEf 搜索最近邻（自定义ef参数）
+// ef: 搜索时扩展因子，越大越精确但越慢
+func (h *HNSWGraph) SearchWithEf(query []float32, k, ef int) []SearchResult {
+	if ef <= 0 {
+		ef = h.EfSearch
+	}
+	if ef < k {
+		ef = k
+	}
+
 	h.mu.RLock()
 	if h.EntryPoint == nil {
 		h.mu.RUnlock()
@@ -205,7 +218,7 @@ func (h *HNSWGraph) Search(query []float32, k int) []SearchResult {
 	}
 
 	// 在底层搜索
-	results := h.searchLayer(normalizedQuery, entryPoint, h.EfSearch, 0)
+	results := h.searchLayer(normalizedQuery, entryPoint, ef, 0)
 
 	// 过滤已删除的节点
 	validResults := make([]SearchResult, 0, len(results))

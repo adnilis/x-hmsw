@@ -92,14 +92,14 @@ func (q *QuickDB) SearchWithOptions(query types.Vector, opts iface.SearchOptions
 	return q.db.Search(query, opts)
 }
 
-// Delete 删除向量
-func (q *QuickDB) Delete(ids []string) error {
-	return q.db.Delete(ids)
+// Deletes 删除向量
+func (q *QuickDB) Deletes(ids []string) error {
+	return q.db.Deletes(ids)
 }
 
-// DeleteOne 删除单个向量
-func (q *QuickDB) DeleteOne(id string) error {
-	return q.db.Delete([]string{id})
+// Delete 删除单个向量
+func (q *QuickDB) Delete(id string) error {
+	return q.db.Delete(id)
 }
 
 // InsertWithText 插入文本，自动生成向量
@@ -222,6 +222,57 @@ func (q *QuickDB) GetEmbeddingFunc() embedding.EmbeddingFunc {
 // GetBatchEmbeddingFunc 获取批量Embedding函数
 func (q *QuickDB) GetBatchEmbeddingFunc() embedding.BatchEmbeddingFunc {
 	return q.db.GetBatchEmbeddingFunc()
+}
+
+// GenerateEmbedding 生成单个文本的embedding向量
+// text: 需要转换的文本
+// 返回: 文本的向量表示
+func (q *QuickDB) GenerateEmbedding(text string) ([]float32, error) {
+	embeddingFunc := q.db.GetEmbeddingFunc()
+	if embeddingFunc == nil {
+		batchEmbeddingFunc := q.db.GetBatchEmbeddingFunc()
+		if batchEmbeddingFunc == nil {
+			return nil, fmt.Errorf("embedding function is not set")
+		}
+		embeddings, err := batchEmbeddingFunc([]string{text})
+		if err != nil {
+			return nil, err
+		}
+		if len(embeddings) == 0 {
+			return nil, fmt.Errorf("no embedding generated")
+		}
+		return embeddings[0], nil
+	}
+	return embeddingFunc(text)
+}
+
+// GenerateBatchEmbeddings 批量生成多个文本的embedding向量
+// texts: 需要转换的文本列表
+// 返回: 对应的向量列表
+func (q *QuickDB) GenerateBatchEmbeddings(texts []string) ([][]float32, error) {
+	if len(texts) == 0 {
+		return [][]float32{}, nil
+	}
+
+	batchEmbeddingFunc := q.db.GetBatchEmbeddingFunc()
+	if batchEmbeddingFunc == nil {
+		embeddingFunc := q.db.GetEmbeddingFunc()
+		if embeddingFunc == nil {
+			return nil, fmt.Errorf("embedding function is not set")
+		}
+
+		embeddings := make([][]float32, len(texts))
+		for i, text := range texts {
+			vec, err := embeddingFunc(text)
+			if err != nil {
+				return nil, fmt.Errorf("failed to generate embedding for text %d: %w", i, err)
+			}
+			embeddings[i] = vec
+		}
+		return embeddings, nil
+	}
+
+	return batchEmbeddingFunc(texts)
 }
 
 // Count 获取向量数量

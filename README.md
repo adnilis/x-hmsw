@@ -247,7 +247,23 @@ config := iface.Config{
 
 提前加载数据，减少缓存未命中，性能提升 5-10%。
 
-详细性能报告请参考 [性能优化文档](docs/09-性能优化/README.md)。
+### 性能分析工具
+
+项目提供了完整的pprof性能分析工具和优化建议：
+
+- **pprof工具**: `examples/pprof_tool/` - 内存和CPU分析工具
+- **性能测试**: `examples/api_test/` - API系统性测试
+- **优化建议**: `docs/优化建议/性能优化建议.md` - 详细的优化方向
+- **实施指南**: `docs/优化建议/优化实施指南.md` - 逐步优化教程
+
+运行性能分析：
+```bash
+cd scripts
+./analyze_performance.sh          # Linux/Mac
+analyze_performance.bat           # Windows
+```
+
+详细性能报告请参考 [性能优化文档](docs/09-性能优化/README.md) 和 [优化建议](docs/优化建议/)。
 
 ---
 

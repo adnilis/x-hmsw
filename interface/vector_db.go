@@ -382,7 +382,31 @@ func (db *PureGoVectorDB) Search(query Vector, opts SearchOptions) ([]SearchResu
 }
 
 // Delete 删除向量
-func (db *PureGoVectorDB) Delete(ids []string) error {
+func (db *PureGoVectorDB) Delete(id string) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	// 从存储删除
+	if err := db.storage.BatchDelete([]string{id}); err != nil {
+		return fmt.Errorf("failed to delete from storage: %w", err)
+	}
+	if indexID, exists := db.idReverseMap[id]; exists {
+		delete(db.idReverseMap, id)
+		// 标记ID映射中的位置为空（不删除以保持索引一致性）
+		if indexID < len(db.idMap) {
+			db.idMap[indexID] = ""
+		}
+
+		// 从索引中删除节点
+		if err := db.index.Delete(indexID); err != nil {
+			db.logger.Warn("failed to delete node from index", "id", id, "index_id", indexID, "error", err)
+			return err
+		}
+	}
+	return nil
+}
+
+// Deletes 删除向量
+func (db *PureGoVectorDB) Deletes(ids []string) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 

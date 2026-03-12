@@ -4,3 +4,5 @@ x-hmsw.exe
 main.exe
 /data/
 .lh
+*.exe
+*.prof
